@@ -65,7 +65,7 @@ public class CmsCloudService {
     // [EN]    Policy version (e.g. 1_3)
     // [PT-BR] Versão da política (ex: 1_3)
     // [ES]    Versión de la política (p.ej. 1_3)
-    @Value("${solidsign.sig.policyVersion}")
+    @Value("${solidsign.sig.policyVersion:}")
     private String policyVersion;
 
     // [EN]    Cloud HSM credentials as JSON (uuidCert, hsmToken, hsmServiceUrl)
@@ -117,7 +117,7 @@ public class CmsCloudService {
         body.add("profile",            profile);
         body.add("hashAlgorithm",      hashAlgorithm);
         body.add("signaturePackaging", signaturePackaging);
-        body.add("policyVersion",      policyVersion);
+        if (policyVersion != null && !policyVersion.isBlank()) body.add("policyVersion", policyVersion);
 
         try {
             ResponseEntity<SignResponse> resp = restTemplate.postForEntity(
@@ -168,5 +168,64 @@ public class CmsCloudService {
             }
         }
         return baos.toByteArray();
+    }
+
+    // ─── Form endpoint (all params from request, properties ignored) ──────────
+
+    /**
+     * [EN]    Signs documents via CAdES cloud HSM with all parameters supplied by the caller.
+     * [PT-BR] Assina documentos via CAdES HSM em nuvem com todos os parâmetros fornecidos pelo chamador.
+     * [ES]    Firma documentos vía CAdES HSM en la nube con todos los parámetros suministrados por el llamador.
+     *
+     * @return ZIP bytes with signed documents, or null on error
+     */
+    public byte[] signWithCloudForm(String auth, String apiBaseUrl, String cloudCredentials,
+                                     String profile, String hashAlgorithm,
+                                     String signaturePackaging, String policyVersion,
+                                     List<File> files) throws IOException {
+        LOGGER.info("CAdES Cloud form signing for {} file(s).", files.size());
+        String signUrl = apiBaseUrl + "/solidsign/dsig/cms/sign-hsm-cloud";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        headers.set("Authorization", auth);
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        for (int i = 0; i < files.size(); i++) body.add("document[" + i + "]", new FileSystemResource(files.get(i)));
+        body.add("cloudCredentials", cloudCredentials);
+        if (profile != null && !profile.isBlank())                       body.add("profile",            profile);
+        if (hashAlgorithm != null && !hashAlgorithm.isBlank())           body.add("hashAlgorithm",      hashAlgorithm);
+        if (signaturePackaging != null && !signaturePackaging.isBlank()) body.add("signaturePackaging", signaturePackaging);
+        if (policyVersion != null && !policyVersion.isBlank())           body.add("policyVersion",      policyVersion);
+        try {
+            ResponseEntity<SignResponse> resp = restTemplate.postForEntity(
+                    signUrl, new HttpEntity<>(body, headers), SignResponse.class);
+            if (resp.getStatusCode() == HttpStatus.OK && resp.getBody() != null) {
+                SignResponse signResp = resp.getBody();
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+                    HttpHeaders dh = new HttpHeaders();
+                    dh.set("Authorization", auth);
+                    HttpEntity<Void> de = new HttpEntity<>(dh);
+                    for (int i = 0; i < signResp.documents.size(); i++) {
+                        String dlUrl = signResp.documents.get(i).links.stream()
+                                .filter(l -> "self".equals(l.rel)).findFirst()
+                                .map(l -> l.href).orElse(null);
+                        if (dlUrl == null) continue;
+                        ResponseEntity<byte[]> r = restTemplate.exchange(
+                                dlUrl, HttpMethod.GET, de, byte[].class);
+                        if (r.getStatusCode() == HttpStatus.OK) {
+                            zos.putNextEntry(new ZipEntry("signed_" + files.get(i).getName()));
+                            zos.write(r.getBody());
+                            zos.closeEntry();
+                        }
+                    }
+                }
+                return baos.toByteArray();
+            }
+        } catch (HttpStatusCodeException e) {
+            LOGGER.error("SolidSign API error {}: {}", e.getStatusCode(), e.getResponseBodyAsString());
+        } catch (Exception e) {
+            LOGGER.error("Unexpected error in CAdES Cloud form signing: {}", e.getMessage(), e);
+        }
+        return null;
     }
 }

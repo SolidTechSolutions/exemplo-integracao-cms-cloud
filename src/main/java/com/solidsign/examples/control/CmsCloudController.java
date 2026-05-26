@@ -11,6 +11,9 @@ import org.springframework.web.bind.annotation.*;
 import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+import org.springframework.web.multipart.MultipartFile;
 
 /**
  * [EN]    REST controller that triggers CAdES (CMS) signing using cloud HSM credentials.
@@ -74,5 +77,48 @@ public class CmsCloudController {
         return result != null
                 ? ResponseEntity.ok("ZIP at: " + result)
                 : ResponseEntity.internalServerError().body("Failed. Check logs.");
+    }
+
+    /**
+     * [EN]    Form signing endpoint for React front-end integration — CAdES cloud HSM.
+     *         All parameters from multipart/form-data; application.properties ignored.
+     * [PT-BR] Endpoint de formulário para integração React — CAdES HSM em nuvem.
+     *         Todos os parâmetros via multipart/form-data; application.properties ignorado.
+     * [ES]    Endpoint de formulario para integración React — CAdES HSM en nube.
+     *         Todos los parámetros vía multipart/form-data; application.properties ignorado.
+     */
+    @CrossOrigin
+    @PostMapping("/sign/form")
+    public ResponseEntity<byte[]> signForm(
+            @RequestPart("document")                                      MultipartFile[] documents,
+            @RequestPart("authorization")                                 String authorization,
+            @RequestPart("baseUrl")                                       String baseUrl,
+            @RequestPart("cloudCredentials")                              String cloudCredentials,
+            @RequestPart(value = "profile",           required = false)   String profile,
+            @RequestPart(value = "hashAlgorithm",     required = false)   String hashAlgorithm,
+            @RequestPart(value = "signaturePackaging", required = false)  String signaturePackaging,
+            @RequestPart(value = "policyVersion",     required = false)   String policyVersion
+    ) throws IOException {
+        List<File> tmpFiles = new ArrayList<>();
+        java.nio.file.Path tmpDir = java.nio.file.Files.createTempDirectory("solidsign-form-");
+        try {
+            for (MultipartFile mf : documents) {
+                java.nio.file.Path p = tmpDir.resolve(
+                        mf.getOriginalFilename() != null ? mf.getOriginalFilename() : "doc");
+                mf.transferTo(p);
+                tmpFiles.add(p.toFile());
+            }
+            byte[] zip = service.signWithCloudForm(authorization, baseUrl, cloudCredentials,
+                    profile, hashAlgorithm, signaturePackaging, policyVersion, tmpFiles);
+            if (zip != null)
+                return ResponseEntity.ok()
+                        .contentType(org.springframework.http.MediaType.parseMediaType("application/zip"))
+                        .header("Content-Disposition", "attachment; filename=\"signed.zip\"")
+                        .body(zip);
+            return ResponseEntity.internalServerError().build();
+        } finally {
+            tmpFiles.forEach(java.io.File::delete);
+            tmpDir.toFile().delete();
+        }
     }
 }
